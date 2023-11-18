@@ -252,6 +252,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--percent_unconditioning",
+        type=float,
+        default=0.1,
+        help=(
+            "Percentage of samples that have no conditioning (default 0.1)"
+        ),
+    )
+    parser.add_argument(
         "--validation_prompts",
         type=str,
         default=None,
@@ -949,7 +957,9 @@ def main():
 
                 # Get the text embedding for conditioning
                 # encoder_hidden_states = text_encoder(batch["input_ids"])[0]
-                encoder_hidden_states, _, _, _ = pixart_pipeline.encode_prompt(batch['captions'])
+                encoder_hidden_states, _, negative_embeds, _ = pixart_pipeline.encode_prompt(batch['captions'])
+                if random.random() < args.percent_unconditioning:
+                    encoder_hidden_states = negative_embeds
                 # print(encoder_hidden_states.shape, encoder_hidden_states.shape)
 
                 # Get the target for loss depending on the prediction type
@@ -1005,7 +1015,7 @@ def main():
                 global_step += 1
 
                 logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-                logs = { **logs, "train_loss": train_loss}
+                logs = { **logs, "train_loss": train_loss }
 
                 if args.validation_prompts is not None and global_step % args.validation_steps == 0:
                     if args.use_ema:
@@ -1027,6 +1037,7 @@ def main():
                     logs = { **logs, **img_dict }
 
                 accelerator.log(logs, step=global_step)
+                train_loss = 0.0
 
                 if global_step % args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
