@@ -145,8 +145,6 @@ def log_validation(vae, pixart_pipeline, unet, args, accelerator, weight_dtype, 
         revision=args.revision,
         torch_dtype=weight_dtype,
     )
-    del pipeline.text_encoder
-    del pipeline.tokenizer
     pipeline = pipeline.to(accelerator.device)
     pipeline.set_progress_bar_config(disable=True)
 
@@ -161,7 +159,7 @@ def log_validation(vae, pixart_pipeline, unet, args, accelerator, weight_dtype, 
     images = []
     for i in range(len(args.validation_prompts)):
         prompt_embeds, _, negative_prompt_embeds, _ = pixart_pipeline.encode_prompt([args.validation_prompts[i]])
-        with torch.autocast("cuda"):
+        with torch.no_grad(), torch.autocast("cuda"):
             image = pipeline(
                 prompt_embeds=prompt_embeds,
                 negative_prompt_embeds=negative_prompt_embeds,
@@ -176,14 +174,12 @@ def log_validation(vae, pixart_pipeline, unet, args, accelerator, weight_dtype, 
             np_images = np.stack([np.asarray(img) for img in images])
             tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
         elif tracker.name == "wandb":
-            tracker.log(
-                {
-                    "validation": [
-                        wandb.Image(image, caption=f"{i}: {args.validation_prompts[i]}")
-                        for i, image in enumerate(images)
-                    ]
-                }
-            )
+            return {
+                "validation": [
+                    wandb.Image(image, caption=f"{i}: {args.validation_prompts[i]}")
+                    for i, image in enumerate(images)
+                ]
+            }
         else:
             logger.warn(f"image logging not implemented for {tracker.name}")
 
@@ -463,9 +459,9 @@ def parse_args():
     )
     parser.add_argument("--noise_offset", type=float, default=0, help="The scale of noise offset.")
     parser.add_argument(
-        "--validation_epochs",
+        "--validation_steps",
         type=int,
-        default=5,
+        default=100,
         help="Run validation every X epochs.",
     )
     parser.add_argument(
@@ -1007,8 +1003,30 @@ def main():
                     ema_unet.step(unet.parameters())
                 progress_bar.update(1)
                 global_step += 1
-                accelerator.log({"train_loss": train_loss}, step=global_step)
-                train_loss = 0.0
+
+                logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+                logs = { **logs, "train_loss": train_loss}
+
+                if args.validation_prompts is not None and global_step % args.validation_steps == 0:
+                    if args.use_ema:
+                        # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
+                        ema_unet.store(unet.parameters())
+                        ema_unet.copy_to(unet.parameters())
+                    img_dict = log_validation(
+                        vae,
+                        pixart_pipeline,
+                        unet,
+                        args,
+                        accelerator,
+                        weight_dtype,
+                        global_step,
+                    )
+                    if args.use_ema:
+                        # Switch back to the original UNet parameters.
+                        ema_unet.restore(unet.parameters())
+                    logs = { **logs, **img_dict }
+
+                accelerator.log(logs, step=global_step)
 
                 if global_step % args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
@@ -1036,30 +1054,10 @@ def main():
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-            logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
+                progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:
                 break
-
-        if accelerator.is_main_process:
-            if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
-                if args.use_ema:
-                    # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
-                    ema_unet.store(unet.parameters())
-                    ema_unet.copy_to(unet.parameters())
-                log_validation(
-                    vae,
-                    pixart_pipeline,
-                    unet,
-                    args,
-                    accelerator,
-                    weight_dtype,
-                    global_step,
-                )
-                if args.use_ema:
-                    # Switch back to the original UNet parameters.
-                    ema_unet.restore(unet.parameters())
 
     # Create the pipeline using the trained modules and save it.
     accelerator.wait_for_everyone()
