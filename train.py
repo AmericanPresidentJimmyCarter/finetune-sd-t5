@@ -201,6 +201,13 @@ def parse_args():
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
+        "--unet_model_name_or_path",
+        type=str,
+        default=None,
+        help="Path to pretrained unet model or model identifier from huggingface.co/models or locally"
+        " If not specified unet weights are initialized from unet.",
+    )
+    parser.add_argument(
         "--revision",
         type=str,
         default=None,
@@ -621,6 +628,13 @@ def main():
                     print(f'Got runtime error on layer: {k} ({k_new})')
                     raise e
         del unet_to_copy_from
+    elif args.unet_model_name_or_path is not None:
+        logger.info(f"Loading existing unet weights from {args.unet_model_name_or_path}")
+        unet = UNet2DConditionModel.from_pretrained(
+            args.unet_model_name_or_path,
+            subfolder="unet", revision=args.revision, torch_dtype=weight_dtype,
+        ) \
+            .to(device=accelerator.device, dtype=weight_dtype)
     else:
         unet = unet_to_copy_from = UNet2DConditionModel.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
@@ -642,8 +656,10 @@ def main():
         logger.info('It is not allowed to use ema while retraining the cross attention of legacy SD for T5.')
         sys.exit()
     if args.use_ema:
+        if args.unet_model_name_or_path is None:
+            print('When using EMA, --unet_model_name_or_path must be declared')
         ema_unet = UNet2DConditionModel.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision
+            args.unet_model_name_or_path, subfolder="unet", revision=args.revision
         )
         ema_unet = EMAModel(ema_unet.parameters(), model_cls=UNet2DConditionModel, model_config=ema_unet.config)
 
