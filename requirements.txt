@@ -1,0 +1,12 @@
+git+https://github.com/huggingface/diffusers.git@main 
+transformers
+tokenizers
+xformers
+wandb
+torch
+torchvision
+datasets
+ftfy
+Jinja2
+accelerate
+sentencepiece
